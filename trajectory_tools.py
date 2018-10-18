@@ -6,6 +6,53 @@ import netCDF4 as nc
 import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
 import html_animation
+import pandas as pd
+
+# New trajectory object
+"""
+new_trajectory class:
+Defines a pandas dataframe that holds information about a trajectory object,
+as well as associated variables and functions
+"""
+def new_trajectory(dates=[], lon=[], lat=[], height=[], data_dict={}):
+    if type(lon) is np.ndarray:
+        in_lon = lon.flatten()
+    else:
+        in_lon = np.array(lon)
+    if type(lat) is np.ndarray:
+        in_lat = lat.flatten()
+    else:
+        in_lat = np.array(lat)
+    if type(dates) is np.ndarray:
+        in_dates = dates.flatten()
+    else:
+        in_dates = np.array(dates)
+    if (len(in_lon) != len(in_lat) != len(in_dates)):
+        raise Exception("""Input arrays for dates, lat, lon have different
+                        lengths""")
+    else:
+        length = len(in_dates)
+    if len(height) == 0:
+        in_height = np.full_like(in_lon, 0.)
+    else:
+        if type(height) is np.ndarray:
+            in_height = height.flatten()
+        else:
+            in_height = np.array(height)
+    keys = ['dates', 'time', 'lon', 'lat', 'height']
+    time_offset = in_dates-in_dates[0]
+    values = [in_dates, time_offset, in_lon, in_lat, in_height]
+    if len(data_dict) > 0:
+        keys.extend(data_dict.keys())
+        values.extend(data_dict.values())
+        values = np.stack(values, axis=1)
+    else:
+        values = np.stack(values, axis=1)
+    if time_offset[1].total_seconds() < 0:
+        index = np.arange(0,-length,-1).astype(int)
+    else:
+        index = np.arange(length).astype(int)
+    return pd.DataFrame(values, columns=keys, index=index)
 
 # Define a trajectories object
 class trajectory:
@@ -143,7 +190,7 @@ class trajectory:
 def setup_hysplit(control_filename, start_lat, start_lon, start_height,
                   start_date=None, start_year=2017, start_month=9, start_day=2,
                   start_hour=0, duration=24, vert_motion=0, domain_height=15000,
-                  metdata_filenames='/group_workspaces/cems2\nceo_generic/model_data/ARL_data/ERA5*.arl',
+                  metdata_filenames='/group_workspaces/cems2/nceo_generic/model_data/ARL_data/ERA5*.arl',
                   endpoint_filename='./tdump'):
     """
     Creates a HySPLIT CONTROL file that can be used to run the trajectory model
@@ -204,6 +251,66 @@ def setup_hysplit(control_filename, start_lat, start_lon, start_height,
         control.write('{tdump_path}\n'.format(tdump_path=endpoint_path))
         control.write('{tdump_file}\n'.format(tdump_file=endpoint_file))
 
+def parse_a_traj(traj_data, i, diagnostic_vars=[]):
+    """
+    parses an array of data from a hysplit output file and returns a single
+    trajectory object
+    """
+    if i not in set(traj_data[:,0]):
+        raise ValueError("""Input trajectory index: """+str(i)+"""not present in
+                         trajectory data file""")
+    wh = traj_data[:,0]==i
+    traj_length = np.sum(wh)
+    var_map = {'index':0, 'grid':1, 'year':2, 'month':3, 'day':4, 'hour':5,
+               'minute':6, 'forecast_hour':7, 'trajectory_hour':8,
+               'lat':9, 'lon':10, 'height':11}
+    for i, var in enumerate(diagnostic_vars):
+        var_map[var] = 12+i
+    dates = [datetime.datetime(year=int(traj_data[wh,var_map['year']][i]),
+                      month=int(traj_data[wh,var_map['month']][i]),
+                      day=int(traj_data[wh,var_map['day']][i]),
+                      hour=int(traj_data[wh,var_map['hour']][i]),
+                      minute=int(traj_data[wh,var_map['minute']][i]))
+                      for i in range(traj_length)]
+    diagnostic_data = {}
+    for var in diagnostic_vars:
+        diagnostic_data[var] = traj_data[wh,var_map[var]]
+    traj = new_trajectory(dates, traj_data[wh,var_map['lon']],
+                          traj_data[wh,var_map['lat']],
+                          traj_data[wh,var_map['height']],
+                          diagnostic_data)
+    return traj
+
+def new_parse_hysplit(text_file):
+    """
+    parse_hysplit function
+    Parses a HySPLIT output text file containing 1 or multiple trajectories.
+    In: Text file to parse
+    Out: Trajectory object for a single trajectory or a list of multiple
+        trajectory objects for a file containing multiple trajectories
+    """
+    with open(text_file) as f:
+        # Nested comprehension takes each line, cuts off the last character
+        #  (newline), splits each line by spaces and removes the null characters
+        #  left between successive spaces.
+        traj_lines = [[s for s in line[:-1].split(' ') if s != '']
+                                                      for line in f.readlines()]
+    f.close()
+    # Now parse through the list to find the trajectory info
+    # First record = number of meteorology files
+    n_datasets = int(traj_lines[0][0])
+    n_traj = int(traj_lines[n_datasets+1][0])
+    # Get the names of any diagnostic variables
+    diagnostic_vars = traj_lines[n_datasets+n_traj+2][1:]
+    # Get the data record of the trajectories
+    traj_data = np.array(traj_lines[n_datasets+n_traj+3:]).astype(float)
+    # Year is formatted YY, so need to add 2000/1900 as appropriate
+    traj_data[...,2][traj_data[...,2]<50] += 100.
+    traj_data[...,2] += 1900.
+    # If more than 1 trajectory split into separate arrays
+    traj = [parse_a_traj(traj_data, i, diagnostic_vars)
+            for i in set(traj_data[:,0])]
+    return traj
 
 def parse_hysplit(text_file):
     """
